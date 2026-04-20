@@ -6,7 +6,7 @@ USERNAME = "admin"
 PASSWORD = "admin"
 
 
-# 🔐 LOGIN
+# Authentification — retourne le JWT access token
 def get_token():
     res = requests.post(
         f"{SUPERSET_URL}/api/v1/security/login",
@@ -20,50 +20,44 @@ def get_token():
     return res.json()["access_token"]
 
 
-# 📊 GET DATASET
+# Récupère le dataset_id à partir du nom de la table
 def get_dataset(token, table_name):
     headers = {"Authorization": f"Bearer {token}"}
-
     res = requests.get(
         f"{SUPERSET_URL}/api/v1/dataset/?q=(filters:!((col:table_name,opr:eq,value:{table_name})))",
         headers=headers
     )
-
     return res.json()["result"][0]["id"]
 
 
-# 📚 GET COLUMNS
+# Retourne la liste des colonnes d'un dataset
 def get_columns(token, dataset_id):
     headers = {"Authorization": f"Bearer {token}"}
-
     res = requests.get(
         f"{SUPERSET_URL}/api/v1/dataset/{dataset_id}",
         headers=headers
     )
-
     return [c["column_name"] for c in res.json()["result"]["columns"]]
 
 
-
-
-# 🧠 metrics builder
+# Construit une liste de métriques au format Superset legacy
 def build_metrics(metrics):
     if not metrics:
         return ["count__*"]
-
     return [
         f"{m.get('type','sum')}__{m.get('column','')}"
         for m in metrics
     ]
 
 
-# 🧠 fix viz type if no datetime
+# Remplace les viz time-series si aucune colonne datetime n'existe
 def fix_viz(viz_type, time_col):
     if viz_type in ["line", "area", "time-series"] and not time_col:
         return "histogram"
     return viz_type
 
 
+# Détecte automatiquement une colonne temporelle dans le dataset
 def detect_time_column(columns):
     for c in columns:
         if any(x in c.lower() for x in ["date", "time", "created", "timestamp"]):
@@ -71,37 +65,28 @@ def detect_time_column(columns):
     return None
 
 
-# -----------------------------
-# 🔥 fix viz type safely
-# -----------------------------
+# Alias sécurisé de fix_viz avec flag booléen
 def fix_viz_type(viz_type, has_time):
     time_viz = ["line", "area", "time-series"]
-
     if viz_type in time_viz and not has_time:
         return "histogram"
-
     return viz_type
 
 
-# -----------------------------
-# 🔥 MAIN FUNCTION
-# -----------------------------
-
-
-
+# Crée un chart dans Superset via POST /api/v1/chart/
 def create_chart(token, dataset_id, result):
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
 
-    viz_type       = result.get("viz_type", "bar")
-    title          = result.get("title", "AI Chart")
-    groupby        = result.get("groupby", ["region"])
-    metric_column  = result.get("metric_column", "montant_vente")
-    metric_agg     = result.get("metric_agg", "SUM")
+    viz_type      = result.get("viz_type", "bar")
+    title         = result.get("title", "AI Chart")
+    groupby       = result.get("groupby", ["region"])
+    metric_column = result.get("metric_column", "montant_vente")
+    metric_agg    = result.get("metric_agg", "SUM")
 
-    # Build the metric object
+    # Objet métrique au format attendu par Superset
     metric = {
         "expressionType": "SIMPLE",
         "column": {"column_name": metric_column},
@@ -109,7 +94,7 @@ def create_chart(token, dataset_id, result):
         "label": f"{metric_agg}({metric_column})"
     }
 
-    # Map friendly viz_type → Superset internal name
+    # Mapping viz_type générique → nom interne Superset
     VIZ_MAP = {
         "bar":        "dist_bar",
         "pie":        "pie",
@@ -119,49 +104,50 @@ def create_chart(token, dataset_id, result):
     }
     superset_viz = VIZ_MAP.get(viz_type, "dist_bar")
 
-    # Base form_data shared by all types
+    # form_data de base commun à tous les types
     form_data = {
-        "datasource":  f"{dataset_id}__table",
-        "viz_type":    superset_viz,
-        "time_range":  "No filter",
-        "row_limit":   1000,
+        "datasource": f"{dataset_id}__table",
+        "viz_type":   superset_viz,
+        "time_range": "No filter",
+        "row_limit":  1000,
     }
 
-    # Per-viz field mapping
+    # Champs spécifiques selon le type de chart
     if viz_type == "bar":
         form_data.update({
             "groupby": groupby,
-            "columns": [],
+            "columns": [],        # requis par dist_bar
             "metrics": [metric],
         })
 
     elif viz_type == "pie":
         form_data.update({
-            "groupby": groupby,
-            "metrics": [metric],
-            "donut":   False,
-            "show_legend": True,
+            "groupby":      groupby,
+            "metrics":      [metric],
+            "donut":        False,
+            "show_legend":  True,
         })
 
     elif viz_type == "table":
         form_data.update({
-            "groupby":      groupby,
-            "metrics":      [metric] if groupby else [],
-            "all_columns":  [] if groupby else [metric_column],
-            "order_desc":   True,
+            "groupby":     groupby,
+            "metrics":     [metric] if groupby else [],
+            "all_columns": [] if groupby else [metric_column],
+            "order_desc":  True,
         })
 
     elif viz_type == "big_number":
+        # big_number_total utilise "metric" au singulier
         form_data.update({
-            "metric": metric,  # big_number uses singular "metric"
+            "metric": metric,
         })
 
     elif viz_type == "scatter":
-        # scatter needs x and y — use quantite vs montant_vente
+        # Scatter : x et y sont deux métriques numériques distinctes
         x_col = "quantite" if metric_column == "montant_vente" else "montant_vente"
         form_data.update({
-            "entity":  groupby[0] if groupby else "client",
-            "x":       {
+            "entity": groupby[0] if groupby else "client",
+            "x": {
                 "expressionType": "SIMPLE",
                 "column": {"column_name": x_col},
                 "aggregate": "SUM",
@@ -170,12 +156,13 @@ def create_chart(token, dataset_id, result):
             "y": metric,
         })
 
+    # Payload final — form_data doit être un JSON string (pas un dict)
     payload = {
         "datasource_id":   dataset_id,
         "datasource_type": "table",
         "slice_name":      title,
         "viz_type":        superset_viz,
-        "params":          json.dumps(form_data),
+        "params":          json.dumps(form_data),  # clé critique
     }
 
     res = requests.post(
